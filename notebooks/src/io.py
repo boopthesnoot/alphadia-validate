@@ -1,16 +1,19 @@
+"""I/O utilities for loading AlphaDIA data."""
+
+from __future__ import annotations
+
 import os
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from alphabase.spectral_library.base import SpecLibBase
 from alphabase.spectral_library.flat import SpecLibFlat
 from alphabase.tools.data_downloader import DataShareDownloader
-from alphadia.raw_data.alpharaw_wrapper import MzML, Sciex, Thermo
-from alphadia.raw_data.bruker import TimsTOFTranspose
+from alphadia.data.alpharaw_wrapper import MzML, Sciex, Thermo
+from alphadia.data.bruker import TimsTOFTranspose
 
-# Bulk injections of HeLa cell lysate acquired on the Orbitrap Astral
 EXAMPLE_RAW_DATA_URL = "https://datashare.biochem.mpg.de/s/VfqtW5p9MJ0kxAC/download?files=20231017_OA2_TiHe_ADIAMA_HeLa_200ng_Evo011_21min_F-40_07.mzML"
-
 EXAMPLE_PRECURSORS_TSV_URL = (
     "https://datashare.biochem.mpg.de/s/VfqtW5p9MJ0kxAC/download?files=precursors.tsv"
 )
@@ -23,33 +26,30 @@ def load_alphadia_data(
     main_folder: Path,
     *,
     download_urls: tuple[str, str, str] | None = None,
-    raw_file_name: str = None,
-    precursors_file_name: str = None,
-    speclib_file_name: str = None,
-) -> tuple[pd.DataFrame, SpecLibBase, SpecLibFlat, Thermo]:
+    raw_file_name: str | None = None,
+    precursors_file_name: str | None = None,
+    speclib_file_name: str | None = None,
+) -> tuple[pd.DataFrame, SpecLibBase, SpecLibFlat, Any]:
     """Load AlphaDIA results (precursors.tsv + speclib.hdf) and raw data.
 
-    If the download_data is true, this function will download the required data.
+    Args:
+        main_folder: Folder containing data or download destination.
+        download_urls: Optional tuple (raw_url, precursors_url, speclib_url) for downloading.
+        raw_file_name: Name of the raw file (required if not downloading).
+        precursors_file_name: Name of the precursors file (required if not downloading).
+        speclib_file_name: Name of the speclib file (required if not downloading).
 
-    :param main_folder: folder in which data is expected / will be downloaded to
-    :param download_urls: a optional tuple (raw_file_url, precursors_tsv_url, speclib_url) with the URLs to download the data
-    :param precursors_file_name: name of the precursors file (required if download_data is False)
-    :param raw_file_name: name of the raw file (required if download_data is False)
-    :param speclib_file_name: name of the speclib file (required if download_data is False)
-    :return:
+    Returns:
+        Tuple of (precursor_df, spectral_library, spectral_library_flat, dia_data).
     """
     if download_urls:
         precursors_tsv_path, raw_file_path, speclib_path = (
             _download_alphadia_example_data(main_folder, *download_urls)
         )
     else:
-        if (
-            precursors_file_name is None
-            or raw_file_name is None
-            or speclib_file_name is None
-        ):
+        if not all([precursors_file_name, raw_file_name, speclib_file_name]):
             raise ValueError(
-                "Please provide the file names for the precursors, raw file and speclib files"
+                "Provide file names for precursors, raw file, and speclib"
             )
 
         precursors_tsv_path = main_folder / precursors_file_name
@@ -58,30 +58,36 @@ def load_alphadia_data(
 
     current_raw_name = raw_file_path.stem
     precursor_df = pd.read_csv(precursors_tsv_path, sep="\t")
-    precursor_df = precursor_df[precursor_df["run"] == current_raw_name]
+    precursor_df = precursor_df[precursor_df["raw_name"] == current_raw_name]
 
     spectral_library = SpecLibBase()
     spectral_library.load_hdf(speclib_path)
 
     print("Reading raw file ...")
-    if raw_file_path.suffix.lower() == ".mzml":
-        dia_data = MzML(str(raw_file_path))
-    elif raw_file_path.suffix.lower() == ".raw":
-        dia_data = Thermo(str(raw_file_path))
-    elif raw_file_path.suffix.lower() == ".wiff":
-        dia_data = Sciex(str(raw_file_path))
-    elif raw_file_path.suffix.lower() == ".d":
-        dia_data = TimsTOFTranspose(str(raw_file_path))
-    else:
-        raise ValueError(
-            f"Unsupported file type: {raw_file_path.suffix}. Supported types are .mzML, .raw, .wiff, and .d"
-        )
+    dia_data = _load_raw_file(raw_file_path)
 
     print("Parsing spectral library ...")
     spectral_library_flat = SpecLibFlat()
     spectral_library_flat.parse_base_library(spectral_library)
 
     return precursor_df, spectral_library, spectral_library_flat, dia_data
+
+
+def _load_raw_file(raw_file_path: Path) -> Any:
+    """Load raw data file based on extension."""
+    suffix = raw_file_path.suffix.lower()
+    loaders = {
+        ".mzml": MzML,
+        ".raw": Thermo,
+        ".wiff": Sciex,
+        ".d": TimsTOFTranspose,
+    }
+
+    if suffix not in loaders:
+        supported = ", ".join(loaders.keys())
+        raise ValueError(f"Unsupported file type: {suffix}. Supported: {supported}")
+
+    return loaders[suffix](str(raw_file_path))
 
 
 def _download_alphadia_example_data(
@@ -91,7 +97,6 @@ def _download_alphadia_example_data(
     os.makedirs(main_folder, exist_ok=True)
 
     raw_file_path = DataShareDownloader(raw_data_url, str(main_folder)).download()
-
     precursors_tsv_path = DataShareDownloader(
         precursors_tsv_url, str(main_folder)
     ).download()
@@ -100,10 +105,21 @@ def _download_alphadia_example_data(
     return Path(precursors_tsv_path), Path(raw_file_path), Path(speclib_path)
 
 
-def display_spectral_library(spectral_library):
-    print("precursor_df")
-    display(
-        spectral_library.precursor_df[
+def get_spectral_library_summary(spectral_library: SpecLibBase) -> dict[str, pd.DataFrame]:
+    """Get summary DataFrames from a spectral library.
+
+    Args:
+        spectral_library: SpecLibBase instance.
+
+    Returns:
+        Dict with 'precursor_df', 'fragment_mz_df', 'fragment_intensity_df',
+        and 'flat_fragment_df' DataFrames.
+    """
+    spectral_library_flat = SpecLibFlat()
+    spectral_library_flat.parse_base_library(spectral_library)
+
+    return {
+        "precursor_df": spectral_library.precursor_df[
             [
                 "precursor_mz",
                 "sequence",
@@ -114,19 +130,8 @@ def display_spectral_library(spectral_library):
                 "frag_start_idx",
                 "frag_stop_idx",
             ]
-        ].head()
-    )
-
-    print("fragment_mz_df")
-    display(spectral_library.fragment_mz_df.head())
-
-    print("fragment_intensity_df")
-    display(spectral_library.fragment_intensity_df.head())
-
-    from alphabase.spectral_library.flat import SpecLibFlat
-
-    spectral_library_flat = SpecLibFlat()
-    spectral_library_flat.parse_base_library(spectral_library)
-
-    print("spectral_library_flat.fragment_df")
-    display(spectral_library_flat.fragment_df)
+        ],
+        "fragment_mz_df": spectral_library.fragment_mz_df,
+        "fragment_intensity_df": spectral_library.fragment_intensity_df,
+        "flat_fragment_df": spectral_library_flat.fragment_df,
+    }

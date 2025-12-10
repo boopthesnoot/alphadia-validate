@@ -1,3 +1,9 @@
+"""Mirror plot visualization for comparing observed vs theoretical spectra."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import altair
 import numpy as np
 import pandas as pd
@@ -5,7 +11,10 @@ import seaborn as sns
 
 from .xic_utils import correlation_coefficient, median_axis, normalize_profiles
 
-fragment_colos = {
+if TYPE_CHECKING:
+    from .slicer import SpectrumSlicer
+
+FRAGMENT_COLORS = {
     "a": "#388E3C",
     "b": "#1976D2",
     "c": "#00796B",
@@ -18,47 +27,33 @@ fragment_colos = {
 
 
 def _get_colors(n_colors, palette_name=None):
+    """Get a color palette for RT scans."""
     if palette_name is not None:
         pal = sns.color_palette(palette_name, n_colors)
-        colors = list(pal.as_hex())
-    else:
-        pal = sns.color_palette("Spectral", n_colors + 3)  # .as_hex
-        colors = list(pal.as_hex())
-        remove_middle_elements(colors)
-    return colors
+        return list(pal.as_hex())
+
+    pal = sns.color_palette("Spectral", n_colors + 3)
+    colors = list(pal.as_hex())
+    # Remove middle elements to avoid washed-out colors
+    if len(colors) >= 6:
+        mid = len(colors) // 2
+        del colors[mid - 1 : mid + 2]
+    return colors[:n_colors]
 
 
-def remove_middle_elements(lst):
-    middle_index = len(lst) // 2
-    lst.pop(middle_index)
-    lst.pop(middle_index - 1)
-    lst.pop(middle_index - 2)
-    # lst.pop(0) ## delete first 3 elements
-    # lst.pop(0)
-    # lst.pop(0)
-    return lst
+def split_dense_by_rt(dense, mz_library, label_library):
+    """Split dense spectrum array by retention time."""
+    intensity_observed_full = dense[0].sum(axis=(1, 2))
 
-
-def split_dense_byRT(dense, mz_library, label_library):
-    intensity_observed_full = dense[0].sum(
-        axis=(1, 2)
-    )  ## do not sum over rt have shape (int, rt)
-
-    intensity_flat = intensity_observed_full.ravel()
-    mz_flat = np.tile(mz_library, dense[0].shape[3])
-    # intensity_flat.shape, mz_flat.shape
-
-    # Recover the original (mz, rt) index from the flattened array
-    # Flatten mz library
     reconstructed_indices = np.unravel_index(
-        np.arange(intensity_flat.size), intensity_observed_full.shape
+        np.arange(intensity_observed_full.size), intensity_observed_full.shape
     )
     mz_flat = mz_library[reconstructed_indices[0]]
     label_flat = label_library[reconstructed_indices[0]]
+    intensity_flat = intensity_observed_full.ravel()
 
     indices = np.indices(intensity_observed_full.shape)
-    rt_indices = indices[1].ravel()  # Retention time indices
-    # cylce_indices = ...
+    rt_indices = indices[1].ravel()
 
     df_obs = pd.DataFrame(
         {
@@ -66,13 +61,11 @@ def split_dense_byRT(dense, mz_library, label_library):
             "frag_label": label_flat,
             "intensity": intensity_flat,
             "rt_idx": rt_indices,
-            # 'cycle_idx': cycle_indices
         }
     )
     df_obs["rt_cat"] = pd.Categorical(df_obs.rt_idx)
-    max_int = df_obs.groupby(["mz"])["intensity"].sum().reset_index()["intensity"].max()
+    max_int = df_obs.groupby("mz")["intensity"].sum().max()
     df_obs["norm_intensity"] = df_obs["intensity"] / max_int
-
     df_obs["frag_label"] = df_obs.apply(
         lambda x: "" if x.intensity <= 0 else x.frag_label, axis=1
     )
@@ -81,129 +74,20 @@ def split_dense_byRT(dense, mz_library, label_library):
 
 
 def convert_library_to_df(mz_library, intensity_library):
+    """Convert library arrays to DataFrame."""
     df_library = pd.DataFrame({"mz": mz_library, "intensity": intensity_library})
-    df_library["norm_intensity"] = df_library["intensity"] / max(
-        df_library["intensity"]
-    )
+    df_library["norm_intensity"] = df_library["intensity"] / df_library["intensity"].max()
     return df_library
 
 
-def interpolate_colors_red_to_green(num_colors):
-    colors = []
-    for i in range(num_colors):
-        red = int(255 * (i / (num_colors - 1)) ** 0.7)  # Interpolating red channel
-        green = int(
-            255 * (1 - (i / (num_colors - 1)) ** 0.3)
-        )  # Interpolating green channel
-        colors.append(f"#{red:02X}{green:02X}00")  # Keep blue at 0
-    return colors[::-1]
-
-
-def interpolate_colors_orange_yellow_green(num_colors):
-    colors = []
-    midpoint = num_colors // 2  # Halfway point (orange → yellow, then yellow → green)
-
-    for i in range(num_colors):
-        if i < midpoint:
-            # Interpolate from Orange (#FFA500) to Yellow (#FFFF00)
-            red = 255
-            green = int(
-                165 + (90 * (i / (midpoint - 1)) ** 0.5)
-            )  # From 165 (orange) to 255 (yellow)
-        else:
-            # Interpolate from Yellow (#FFFF00) to Green (#00FF00)
-            red = int(
-                255 * (1 - ((i - midpoint) / (num_colors - midpoint - 1)) ** 0.5)
-            )  # Red decreases
-            green = 255  # Green stays at 255
-
-        colors.append(f"#{red:02X}{green:02X}00")  # Keep blue at 0
-
-    return colors
-
-
-# Function to interpolate colors from red to yellow (existing function)
-def interpolate_colors_red_to_yellow(num_colors):
-    colors = []
-    for i in range(num_colors):
-        green = int(
-            255 * (i / (num_colors)) ** 0.7
-        )  # Linear interpolation for the green channel
-        colors.append(
-            f"#FF{green:02X}00"
-        )  # Format as HEX, keeping red at 255 and blue at 0
-    return colors
-
-
-def interpolate_colors_green_to_yellow(num_colors):
-    colors = []
-    for i in range(num_colors):
-        red = int(
-            255 * (1 - (i / (num_colors - 1)) ** 0.7)
-        )  # Interpolating red channel
-        colors.append(f"#{red:02X}FF00")  # Keep green at 255, blue at 0
-    return colors[::-1]
-
-
-def interpolate_complex_colormap(num_colors):
-    original_num_colors = num_colors
-    num_colors = max(12, num_colors)
-    colors = []
-    segments = [
-        ("#FFFF00", "#CCCC00"),  # Yellow → Dark Yellow
-        ("#CCCC00", "#FF8C00"),  # Dark Yellow → Orange
-        ("#FF8C00", "#00FF00"),  # Orange → Green (Middle)
-        ("#00FF00", "#8B4513"),  # Green → Brown
-        ("#8B4513", "#FFC0CB"),  # Brown → Pink
-        ("#FFC0CB", "#ff0000"),  # Pink → Red
-    ]
-
-    num_segments = len(segments)
-    colors_per_segment = num_colors // num_segments
-
-    def interpolate_color(color1, color2, t):
-        """Linearly interpolate between two hex colors"""
-        c1 = [int(color1[i : i + 2], 16) for i in (1, 3, 5)]
-        c2 = [int(color2[i : i + 2], 16) for i in (1, 3, 5)]
-        return f"#{int(c1[0] + (c2[0] - c1[0]) * t):02X}{int(c1[1] + (c2[1] - c1[1]) * t):02X}{int(c1[2] + (c2[2] - c1[2]) * t):02X}"
-
-    for start_color, end_color in segments:
-        for i in range(colors_per_segment):
-            t = i / (colors_per_segment - 1 if colors_per_segment > 1 else 1)
-            colors.append(interpolate_color(start_color, end_color, t))
-
-    # print(num_colors)
-    # print(len(colors), colors)
-    colors = list(set(colors))[:original_num_colors]
-    return colors
-
-
-def get_palette_for_RT(num_rt_scans):
-    if num_rt_scans == 1:
-        return ["#FF0000"]
-    # left_cols = interpolate_colors_red_to_green(math.ceil(num_rt_scans/2.))[:-1]
-    # right_cols = interpolate_colors_orange_yellow_green(math.floor(num_rt_scans/2.)+1)[::-1]
-    # return (left_cols + right_cols)[::-1]
-    return interpolate_complex_colormap(num_rt_scans)
-
-
-def format_prec_entry(prec):
+def format_precursor_entry(prec):
+    """Format precursor entry for display."""
     if isinstance(prec.mods, str):
-        mod_label_mapping = {
-            "Carbamidomethyl": "",
-            "Oxidation": "(Ox)",
-        }
-
         seq = list(prec.sequence)
         mods = [m.split("@")[0] for m in prec.mods.split(";")]
         sites = np.array(prec.mod_sites.split(";"), dtype=int) - 1
         for i, s in enumerate(sites):
-            mod = (
-                f"({mods[i]})"
-                if mods[i] not in mod_label_mapping
-                else mod_label_mapping[mods[i]]
-            )
-            seq[s] = f"{seq[s]}{mod}"
+            seq[s] = f"{seq[s]}[{mods[i]}]"
         seq = "".join(seq)
     else:
         seq = prec.sequence
@@ -211,6 +95,7 @@ def format_prec_entry(prec):
 
 
 def add_corr(df_obs, df_library):
+    """Add correlation coefficients to observation DataFrame."""
     df_merged = df_library.merge(df_obs, on="mz")
     df_merged.columns = [
         c.replace("_x", "_pred").replace("_y", "_obs") for c in df_merged.columns
@@ -234,7 +119,7 @@ def add_corr(df_obs, df_library):
     return df_obs_corr
 
 
-def plot_mirror_byRT(
+def plot_mirror_by_rt(
     dense,
     mz_library,
     intensity_library,
@@ -244,66 +129,56 @@ def plot_mirror_byRT(
     width=800,
     height=300,
 ):
-    seq = format_prec_entry(precursor_entry)
+    """Create mirror plot comparing observed vs theoretical spectra by RT."""
+    seq = format_precursor_entry(precursor_entry)
     df_library = convert_library_to_df(mz_library, intensity_library)
-    df_obs = split_dense_byRT(dense, mz_library, label_library)
+    df_obs = split_dense_by_rt(dense, mz_library, label_library)
 
     if add_corr_coeff:
         df_obs = add_corr(df_obs, df_library)
 
-    return plot_mirror_byRT_from_dfs(df_obs, df_library, seq, width, height)
+    return plot_mirror_by_rt_from_dfs(df_obs, df_library, seq, width, height)
 
 
-def plot_mirror_byRT_from_dfs(df_obs, df_library, title="", width=800, height=300):
-    theo = plot_theo(df_library)
-    obs = plot_obs_byRT(df_obs)
+def plot_mirror_by_rt_from_dfs(df_obs, df_library, title="", width=800, height=300):
+    """Create mirror plot from DataFrames."""
+    theo = _plot_theo(df_library)
+    obs = _plot_obs_by_rt(df_obs)
 
-    # middle line to separate obs vs theo
     middle_line = (
         altair.Chart(pd.DataFrame({"sep": [0]}))
         .mark_rule(size=3)
         .encode(y="sep", color=altair.value("lightGray"))
     )
 
-    ## title
-    title = altair.TitleParams(
-        text=title,
-        # fontSize=16,
-        fontWeight="bold",
-        # anchor="start",  # Align title to the left
-        color="black",
-    )
+    title_params = altair.TitleParams(text=title, fontWeight="bold", color="black")
 
     return (obs + theo + middle_line).properties(
-        width=width, height=height, title=title
+        width=width, height=height, title=title_params
     )
 
 
-def plot_obs_byRT(df_plot):
+def _plot_obs_by_rt(df_plot):
+    """Plot observed spectrum colored by RT scan."""
     annotation_kws = {"align": "left", "angle": 270, "baseline": "middle"}
 
     anno = [
         altair.Tooltip("mz", format=".3f", title="m/z"),
-        altair.Tooltip(
-            "norm_intensity", format=".2f", title="Intensity"
-        ),  # format='.%'
+        altair.Tooltip("norm_intensity", format=".2f", title="Intensity"),
     ]
 
+    df_plot = df_plot.copy()
     df_plot["label_color"] = df_plot["frag_label"].apply(
-        lambda x: fragment_colos[x[0]]
-        if (x != "" and x[0]) in fragment_colos
-        else "#0000FF"
+        lambda x: FRAGMENT_COLORS.get(x[0] if x else None, "#0000FF")
     )
 
-    # Extract the numeric part of rt_cat for sorting: e.g. "1, r=0.13" => "1"
     df_plot["rt_idx"] = df_plot["rt_cat"].apply(
         lambda x: int(x.split(",")[0]) if isinstance(x, str) and "," in x else x
     )
 
-    # Get unique categories in numeric order
     rt_categories = df_plot.sort_values("rt_idx")["rt_cat"].unique().tolist()
+    rt_colors = _get_colors(n_colors=len(rt_categories))
 
-    rt_colors = _get_colors(n_colors=len(rt_categories))  # get_palette_for_RT(num_rts)
     color = altair.Color(
         "rt_cat",
         scale=altair.Scale(domain=rt_categories, range=rt_colors),
@@ -319,15 +194,12 @@ def plot_obs_byRT(df_plot):
             domain=[50, (max(df_plot["mz"]) // 10) * 10 + 50],
         ),
     )
-
     y = altair.Y(
         "sum(norm_intensity):Q",
-        axis=altair.Axis(title=["Intensity"], format=".2f", grid=True),  # format='%'
-        # scale=altair.Scale(nice=True, padding=0)
+        axis=altair.Axis(title="Intensity", format=".2f", grid=True),
     )
-    color2 = altair.Color(
-        "label_color", scale=None
-    )  # altair.Scale(scheme='set2'), title='RT Scan')
+    color2 = altair.Color("label_color", scale=None)
+
     frag_anno = (
         altair.Chart(df_plot)
         .mark_text(dx=10, **annotation_kws)
@@ -341,13 +213,16 @@ def plot_obs_byRT(df_plot):
     )
 
 
-def plot_theo(df_plot):
+def _plot_theo(df_plot):
+    """Plot theoretical spectrum (inverted)."""
     anno = [
         altair.Tooltip("mz", format=".3f", title="m/z"),
-        altair.Tooltip("intensity", format=".2f", title="Intensity"),  # format='.%'
+        altair.Tooltip("intensity", format=".2f", title="Intensity"),
     ]
 
+    df_plot = df_plot.copy()
     df_plot["minus_intensity"] = -df_plot["norm_intensity"]
+
     x = altair.X(
         "mz",
         axis=altair.Axis(title="m/z", titleFontStyle="italic", grid=True),
@@ -358,44 +233,38 @@ def plot_theo(df_plot):
             domain=[50, (max(df_plot["mz"]) // 10) * 10 + 50],
         ),
     )
-
     y = altair.Y(
         "minus_intensity",
-        axis=altair.Axis(title=["Intensity"], format="", grid=True),  # format='%'
+        axis=altair.Axis(title="Intensity", format="", grid=True),
         scale=altair.Scale(nice=True, padding=0),
     )
     return altair.Chart(df_plot).mark_rule(size=3).encode(x=x, y=y, tooltip=anno)
 
 
-def plot_xic_w_background(spectrum_slice, palette_name=None, hex_colors=None):
-    xic_observed = spectrum_slice[0].sum(
-        axis=(1, 2)
-    )  ## this gives us mz info and rt info
-    ## this gives intensities for every m/z and RT scan
+def plot_xic_with_background(spectrum_slice, palette_name=None, hex_colors=None):
+    """Plot XIC with colored background for each RT scan."""
+    xic_observed = spectrum_slice[0].sum(axis=(1, 2))
     df_xic = (
         pd.DataFrame(xic_observed).reset_index().rename(columns={"index": "mz_scan"})
     )
     df_xic = df_xic.melt(
         id_vars=["mz_scan"], var_name="RT_scan", value_name="intensity"
     )
-    n_colors = df_xic[["RT_scan"]].drop_duplicates().shape[0]
+    n_colors = df_xic["RT_scan"].nunique()
 
-    # Compute mean/median intensity across mz scans
     median_data = df_xic.groupby("RT_scan", as_index=False)["intensity"].mean()
 
-    try:  # if hex_colors is not None:
+    if hex_colors is not None:
         background_colors = hex_colors[:n_colors]
-    except:
+    else:
         background_colors = _get_colors(palette_name=palette_name, n_colors=n_colors)
 
-    # Create background bars to distinguish RT scans
     background = (
         altair.Chart(df_xic)
         .mark_bar(opacity=0.05)
         .encode(
             x=altair.X("RT_scan:O", axis=altair.Axis(title="RT scan")),
-            # x=altair.X('RT_scan:O', axis=None),
-            y=altair.value(1),  # Dummy value for full-height bars
+            y=altair.value(1),
             color=altair.Color(
                 "RT_scan:O",
                 scale=altair.Scale(
@@ -404,17 +273,16 @@ def plot_xic_w_background(spectrum_slice, palette_name=None, hex_colors=None):
                 legend=None,
             ),
         )
-        .properties(width=400, height=300, title="")
+        .properties(width=400, height=300)
     )
 
-    # Create the line plot with a continuous color legend
     base_chart = (
         altair.Chart(df_xic)
         .mark_line()
         .encode(
             x=altair.X(
                 "RT_scan:Q", axis=altair.Axis(title=None, labels=False, ticks=False)
-            ),  #'RT_scan:Q',
+            ),
             y="intensity:Q",
             color=altair.Color(
                 "mz_scan:Q",
@@ -424,26 +292,22 @@ def plot_xic_w_background(spectrum_slice, palette_name=None, hex_colors=None):
         )
     )
 
-    # Add median intensity line in red with legend
     median_chart = (
         altair.Chart(median_data)
         .mark_line(color="red")
         .encode(
             x=altair.X(
                 "RT_scan:Q", axis=altair.Axis(title=None, labels=False, ticks=False)
-            ),  #'RT_scan:Q',
-            # x='RT_scan:Q',
+            ),
             y="intensity:Q",
         )
     )
 
-    # Combine charts
-    chart = background + base_chart + median_chart
-
-    return chart
+    return background + base_chart + median_chart
 
 
 def plot_correlations(spectrum_slice, mz_library):
+    """Plot correlation coefficients for each fragment."""
     intensity_slice = spectrum_slice[0].sum(axis=1).sum(axis=1)
     normalized_intensity_slice = normalize_profiles(intensity_slice)
     median_profile = median_axis(normalized_intensity_slice, axis=0)
@@ -451,38 +315,47 @@ def plot_correlations(spectrum_slice, mz_library):
 
     df_corrs = pd.DataFrame({"mz": mz_library, "corr_coeff": corr_list})
 
-    # Create the bar plot
-    corr_p = (
+    return (
         altair.Chart(df_corrs)
         .mark_circle()
         .encode(
             x=altair.X("mz:Q", axis=altair.Axis(title="m/z")),
             y=altair.X("corr_coeff:Q", axis=altair.Axis(title="Correlation")),
-            # size='corr_coeff:Q'  # Circle size based on the correlation coefficient
             size=altair.Size(
-                "corr_coeff:Q",  # scale=altair.Scale(scheme='greys'),
+                "corr_coeff:Q",
                 legend=altair.Legend(title="Correlation"),
             ),
         )
     )
-    return corr_p
 
 
-def mirror_w_xic_w_corrs(
-    spectrum_slice,
-    mz_library,
-    intensity_library,
-    fragment_library,
-    precursor_df,
-    selected_hash,
-    width=600,
-    height=300,
+def mirror_with_xic_and_corrs(
+    spectrum_slice: np.ndarray,
+    mz_library: np.ndarray,
+    intensity_library: np.ndarray,
+    fragment_library: np.ndarray,
+    precursor_entry: pd.Series,
+    *,
+    width: int = 600,
+    height: int = 300,
 ):
-    precursor_entry = precursor_df[
-        precursor_df["mod_seq_charge_hash"] == selected_hash
-    ].iloc[0]
+    """Create combined mirror plot with XIC and correlations.
 
-    mirror = plot_mirror_byRT(
+    Low-level function that takes pre-fetched data.
+
+    Args:
+        spectrum_slice: Observed spectrum data from slicer.get_by_hash().
+        mz_library: Fragment m/z values from slicer.get_by_hash().
+        intensity_library: Theoretical intensities from slicer.get_by_hash().
+        fragment_library: Fragment labels from slicer.get_by_hash().
+        precursor_entry: Single precursor row (pd.Series) with sequence, mods, charge.
+        width: Plot width in pixels.
+        height: Plot height in pixels.
+
+    Returns:
+        Altair chart with mirror plot, XIC, and correlations.
+    """
+    mirror = plot_mirror_by_rt(
         spectrum_slice,
         mz_library,
         intensity_library,
@@ -491,10 +364,7 @@ def mirror_w_xic_w_corrs(
         width=width * 0.8,
         height=height,
     )
-    xic = plot_xic_w_background(
-        spectrum_slice
-    )  # .properties(width=width*0.2, height=height*0.3)
-
+    xic = plot_xic_with_background(spectrum_slice)
     corrs = plot_correlations(spectrum_slice, mz_library)
 
     mirror_corrs = altair.vconcat(
@@ -502,10 +372,46 @@ def mirror_w_xic_w_corrs(
         corrs.properties(width=width * 0.75, height=height * 0.2),
     ).resolve_scale(x="shared", color="independent", size="independent")
 
-    p = (
+    return (
         (mirror_corrs | xic.properties(width=width * 0.25, height=height * 0.5))
         .resolve_scale(color="independent")
         .configure_view(stroke=None)
     )
 
-    return p
+
+def mirror_with_xic_and_corrs_for_hash(
+    slicer: SpectrumSlicer,
+    selected_hash: int,
+    *,
+    raw_name: str | None = None,
+    width: int = 600,
+    height: int = 300,
+):
+    """Create combined mirror plot with XIC and correlations for a precursor hash.
+
+    High-level convenience function that fetches data from a slicer.
+
+    Args:
+        slicer: Initialized SpectrumSlicer instance.
+        selected_hash: The mod_seq_charge_hash to plot.
+        raw_name: RAW file name (required if hash appears in multiple files).
+        width: Plot width in pixels.
+        height: Plot height in pixels.
+
+    Returns:
+        Altair chart with mirror plot, XIC, and correlations.
+    """
+    mz_library, intensity_library, spectrum_slice, fragment_library = slicer.get_by_hash(
+        selected_hash, raw_name=raw_name
+    )
+    precursor_entry = slicer._select_precursor_entry(selected_hash, raw_name)
+
+    return mirror_with_xic_and_corrs(
+        spectrum_slice,
+        mz_library,
+        intensity_library,
+        fragment_library,
+        precursor_entry,
+        width=width,
+        height=height,
+    )

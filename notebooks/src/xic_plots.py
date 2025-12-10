@@ -1,9 +1,20 @@
-from xic_utils import normalize_profiles, median_axis, correlation_coefficient
+"""XIC (extracted ion chromatogram) plotting utilities."""
+
 import altair as alt
 import pandas as pd
 
+from .xic_utils import correlation_coefficient, median_axis, normalize_profiles
 
-def plot_advanced_xic(spectrum_slice, dia_data):
+
+def plot_advanced_xic(spectrum_slice):
+    """Plot fragment intensity profiles with correlation to median.
+
+    Args:
+        spectrum_slice: 5D spectrum array from SpectrumSlicer.get_by_hash().
+
+    Returns:
+        Altair chart showing normalized fragment profiles and median.
+    """
     intensity_slice = spectrum_slice[0].sum(axis=1).sum(axis=1)
     normalized_intensity_slice = normalize_profiles(intensity_slice)
     median_profile = median_axis(normalized_intensity_slice, axis=0)
@@ -30,7 +41,6 @@ def plot_advanced_xic(spectrum_slice, dia_data):
         }
     )
 
-    # Create fragment profiles layer with different colors
     fragment_layer = (
         alt.Chart(df_fragments)
         .mark_line(opacity=0.8)
@@ -42,14 +52,12 @@ def plot_advanced_xic(spectrum_slice, dia_data):
         )
     )
 
-    # Create median profile layer
     median_layer = (
         alt.Chart(df_median)
         .mark_line(color="black", size=4)
         .encode(x="Retention Time:Q", y="Intensity:Q")
     )
 
-    # Combine layers and configure chart
     chart = (
         (fragment_layer + median_layer)
         .properties(width=400, height=400, title="Fragment Intensity Profiles")
